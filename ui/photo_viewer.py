@@ -1,12 +1,13 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                             QPushButton, QSizePolicy, QScrollArea, QFrame, QGraphicsDropShadowEffect,
-                            QGraphicsView, QGraphicsScene, QSlider, QToolButton)
+                            QGraphicsView, QGraphicsScene, QSlider, QToolButton, QStackedWidget)
 from PySide6.QtCore import Qt, Signal, QSize, QPoint, QTimer, QRectF, QPointF
 from PySide6.QtGui import (QPixmap, QImage, QKeyEvent, QFont, QIcon, QColor,
                          QTransform, QWheelEvent, QCursor, QPainter, QPainterPath)
 from PySide6.QtWidgets import QStyle
 
 from .styling import PHOTO_VIEWER_STYLESHEET, INFO_PANEL_STYLESHEET, COLORS
+from .video_viewer import VideoViewer
 
 class ArrowButton(QPushButton):
     """Custom arrow button that appears on hover"""
@@ -49,384 +50,271 @@ class PhotoViewerWidget(QGraphicsView):
         self.setScene(QGraphicsScene(self))
         self.current_pixmap_item = None
         self.current_pixmap = None
-        self.zoom_factor = 1.0
 
-        # Set zoom limits
-        self.min_zoom = 0.1  # Don't allow zooming out beyond 10% of original size
-        self.max_zoom = 5.0  # Don't allow zooming in beyond 500% of original size
-
-        # Setup appearance - use integers for render hints to ensure compatibility
-        self.setRenderHint(QPainter.Antialiasing, True)
-        self.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        # No HighQualityAntialiasing in some PySide6 versions
-
-        self.setBackgroundBrush(QColor("#121212"))
-        self.setFrameShape(QFrame.NoFrame)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
-        self.setInteractive(True)
+        # Configure the view
         self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+        self.setStyleSheet(f"background-color: {COLORS['background']}; border: none;")
 
-    def set_image(self, pixmap):
-        """Set a new image to display"""
+        # Track zoom level
+        self.zoom_factor = 1.0
+        self.max_zoom = 5.0
+        self.min_zoom = 0.1
+
+    def display_image(self, image_path):
+        """Display an image in the viewer"""
+        # Clear existing content
         self.scene().clear()
-        if pixmap and not pixmap.isNull():
-            self.current_pixmap = pixmap
-            self.current_pixmap_item = self.scene().addPixmap(pixmap)
-            self.current_pixmap_item.setTransformationMode(Qt.SmoothTransformation)
-            self.scene().setSceneRect(QRectF(self.current_pixmap_item.boundingRect()))
-            self.fit_in_view()
+        self.current_pixmap = QPixmap(image_path)
 
-    def fit_in_view(self):
-        """Scale the image to fit within the viewport"""
+        if not self.current_pixmap.isNull():
+            self.current_pixmap_item = self.scene().addPixmap(self.current_pixmap)
+            self.fit_image_to_view()
+        else:
+            # Display error message
+            text_item = self.scene().addText("Error loading image", QFont("Arial", 16))
+            text_item.setDefaultTextColor(QColor(COLORS['text']))
+
+    def fit_image_to_view(self):
+        """Fit the image to the view while maintaining aspect ratio"""
         if self.current_pixmap_item:
             self.fitInView(self.current_pixmap_item, Qt.KeepAspectRatio)
-            # Reset the zoom factor
             self.zoom_factor = 1.0
 
     def wheelEvent(self, event):
-        """Handle mouse wheel events for zooming with limits"""
+        """Handle zoom with mouse wheel"""
         if self.current_pixmap_item:
-            # Determine zoom direction
+            # Get the mouse position
+            old_pos = self.mapToScene(event.position().toPoint())
+
+            # Calculate zoom factor
             zoom_in = event.angleDelta().y() > 0
+            if zoom_in and self.zoom_factor < self.max_zoom:
+                factor = 1.25
+                self.zoom_factor = min(self.zoom_factor * factor, self.max_zoom)
+            elif not zoom_in and self.zoom_factor > self.min_zoom:
+                factor = 0.8
+                self.zoom_factor = max(self.zoom_factor * factor, self.min_zoom)
+            else:
+                return
 
-            # Zoom factor per step
-            factor = 1.1 if zoom_in else 0.9
+            # Apply zoom
+            self.scale(factor, factor)
 
-            # Calculate new zoom factor
-            new_zoom = self.zoom_factor * factor
-
-            # Check zoom limits
-            if new_zoom < self.min_zoom:
-                factor = self.min_zoom / self.zoom_factor
-            elif new_zoom > self.max_zoom:
-                factor = self.max_zoom / self.zoom_factor
-
-            # Apply zoom if within limits
-            if self.min_zoom <= new_zoom <= self.max_zoom:
-                self.scale(factor, factor)
-                self.zoom_factor = new_zoom
-
-    def keyPressEvent(self, event):
-        """Handle key press events"""
-        if event.key() == Qt.Key_F:
-            self.fit_in_view()
-        else:
-            super().keyPressEvent(event)
-
-    def resizeEvent(self, event):
-        """Auto fit when window is resized"""
-        if self.current_pixmap_item and self.zoom_factor == 1.0:
-            self.fit_in_view()
-        super().resizeEvent(event)
-
+            # Keep the mouse position centered
+            new_pos = self.mapToScene(event.position().toPoint())
+            delta = new_pos - old_pos
+            self.translate(delta.x(), delta.y())
 
 class PhotoViewer(QWidget):
-    """Single photo viewer with navigation controls"""
-    close_signal = Signal()
-    next_signal = Signal()
-    prev_signal = Signal()
+    """Photo and Video viewer with navigation controls"""
+    next_requested = Signal()
+    prev_requested = Signal()
+    closed = Signal()
 
-    def __init__(self):
+    def __init__(self, photo_grid):
         super().__init__()
-        self.current_photo = None
+        self.photo_grid = photo_grid
+        self.current_media_data = None
+        self.setup_ui()
+        self.setup_shortcuts()
 
-        # Set darker background for photo viewing
-        self.setStyleSheet("background-color: #121212;")
+    def setup_ui(self):
+        """Setup the user interface"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        # Main layout
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        # Create main content area with stacked widget for image/video switching
+        content_frame = QFrame()
+        content_frame.setStyleSheet(f"background-color: {COLORS['background']};")
+        content_layout = QHBoxLayout(content_frame)
+        content_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Top toolbar with info and controls - semi-transparent dark bar
-        toolbar_widget = QFrame()
-        toolbar_widget.setStyleSheet("background-color: rgba(0, 0, 0, 0.8); color: white;")
-        toolbar_widget.setMinimumHeight(50)
-        toolbar_layout = QHBoxLayout(toolbar_widget)
-        toolbar_layout.setContentsMargins(16, 8, 16, 8)
+        # Stacked widget to switch between image and video viewer
+        self.stacked_widget = QStackedWidget()
 
-        # Button styling for dark background
-        button_style = """
-            QPushButton {
-                background-color: rgba(255, 255, 255, 0.2);
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 255, 255, 0.3);
-            }
-            QPushButton:pressed {
-                background-color: rgba(255, 255, 255, 0.4);
-            }
-        """
+        # Image viewer
+        self.image_viewer = PhotoViewerWidget()
+        self.stacked_widget.addWidget(self.image_viewer)
 
-        # Back button with standard icon
-        self.back_btn = QPushButton(" Back to Grid")
-        self.back_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))
-        self.back_btn.setStyleSheet(button_style)
-        self.back_btn.clicked.connect(self.close_view)
-        toolbar_layout.addWidget(self.back_btn)
+        # Video viewer
+        self.video_viewer = VideoViewer()
+        self.stacked_widget.addWidget(self.video_viewer)
 
-        # Navigation buttons with standard icons
-        nav_layout = QHBoxLayout()
-        nav_layout.setSpacing(10)
+        content_layout.addWidget(self.stacked_widget)
 
-        self.prev_btn = QPushButton(" Previous")
-        self.prev_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
-        self.prev_btn.setStyleSheet(button_style)
-        self.prev_btn.clicked.connect(self.prev_photo)
-        nav_layout.addWidget(self.prev_btn)
+        # Navigation arrows (overlaid on the viewer)
+        self.left_arrow = ArrowButton("left", content_frame)
+        self.left_arrow.clicked.connect(self.show_previous)
+        self.left_arrow.move(20, content_frame.height() // 2 - 50)
 
-        self.next_btn = QPushButton(" Next")
-        self.next_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
-        self.next_btn.setStyleSheet(button_style)
-        self.next_btn.clicked.connect(self.next_photo)
-        nav_layout.addWidget(self.next_btn)
+        self.right_arrow = ArrowButton("right", content_frame)
+        self.right_arrow.clicked.connect(self.show_next)
 
-        toolbar_layout.addLayout(nav_layout)
+        layout.addWidget(content_frame)
 
-        # Zoom controls
-        zoom_layout = QHBoxLayout()
-        zoom_layout.setSpacing(5)
+        # Info panel
+        self.info_panel = self.create_info_panel()
+        layout.addWidget(self.info_panel)
 
-        # Fit button
-        self.fit_btn = QPushButton("Fit")
-        self.fit_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogResetButton))
-        self.fit_btn.setStyleSheet(button_style)
-        self.fit_btn.clicked.connect(self.fit_image)
-        self.fit_btn.setToolTip("Fit image to view (Space)")
-        zoom_layout.addWidget(self.fit_btn)
+        # Setup mouse tracking for arrow visibility
+        content_frame.setMouseTracking(True)
+        self.stacked_widget.setMouseTracking(True)
+        self.setMouseTracking(True)
 
-        # Zoom in button
-        self.zoom_in_btn = QPushButton("+")
-        self.zoom_in_btn.setStyleSheet(button_style)
-        self.zoom_in_btn.clicked.connect(self.zoom_in)
-        self.zoom_in_btn.setToolTip("Zoom in")
-        zoom_layout.addWidget(self.zoom_in_btn)
-
-        # Zoom out button
-        self.zoom_out_btn = QPushButton("-")
-        self.zoom_out_btn.setStyleSheet(button_style)
-        self.zoom_out_btn.clicked.connect(self.zoom_out)
-        self.zoom_out_btn.setToolTip("Zoom out")
-        zoom_layout.addWidget(self.zoom_out_btn)
-
-        toolbar_layout.addLayout(zoom_layout)
-
-        # Spacer
-        toolbar_layout.addStretch()
-
-        # Photo info
-        self.info_label = QLabel()
-        self.info_label.setStyleSheet("color: white; font-size: 11px; background-color: transparent;")
-        self.info_label.setFont(QFont("Segoe UI", 9))
-        toolbar_layout.addWidget(self.info_label)
-
-        main_layout.addWidget(toolbar_widget)
-
-        # Photo viewer widget with navigation arrows
-        photo_container = QWidget()
-        photo_container_layout = QHBoxLayout(photo_container)
-        photo_container_layout.setContentsMargins(0, 0, 0, 0)
-        photo_container_layout.setSpacing(0)
-
-        self.photo_view = PhotoViewerWidget()
-        photo_container_layout.addWidget(self.photo_view)
-
-        main_layout.addWidget(photo_container)
-
-        # Create floating arrow buttons
-        self.left_arrow = ArrowButton("left", self)
-        self.left_arrow.clicked.connect(self.prev_photo)
-        self.left_arrow.setToolTip("Previous photo (Left arrow)")
-
-        self.right_arrow = ArrowButton("right", self)
-        self.right_arrow.clicked.connect(self.next_photo)
-        self.right_arrow.setToolTip("Next photo (Right arrow)")
-
-        # Timer for hiding arrows
-        self.arrow_timer = QTimer(self)
-        self.arrow_timer.timeout.connect(self.hide_arrows)
-        self.arrow_timer.setSingleShot(True)
-
-        # Floating info panel (displays when hovering)
-        self.detail_panel = QFrame(self)
-        self.detail_panel.setStyleSheet("""
-            background-color: rgba(0, 0, 0, 0.7);
-            color: white;
-            border-radius: 8px;
-            padding: 4px;
+    def create_info_panel(self):
+        """Create the information panel at the bottom"""
+        panel = QFrame()
+        panel.setFixedHeight(60)
+        panel.setStyleSheet(f"""
+            QFrame {{
+                background-color: {COLORS['surface']};
+                border-top: 1px solid {COLORS['border']};
+            }}
         """)
-        self.detail_panel.setFixedWidth(300)
-        panel_layout = QVBoxLayout(self.detail_panel)
-        panel_layout.setContentsMargins(12, 12, 12, 12)
-        panel_layout.setSpacing(8)
 
-        self.detail_file_label = QLabel()
-        self.detail_file_label.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        self.detail_file_label.setWordWrap(True)
-        self.detail_file_label.setStyleSheet("color: white;")
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(20, 10, 20, 10)
 
-        self.detail_date_label = QLabel()
-        self.detail_date_label.setFont(QFont("Segoe UI", 9))
-        self.detail_date_label.setStyleSheet("color: #cccccc;")
+        # File name label
+        self.filename_label = QLabel()
+        self.filename_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 14px; font-weight: bold;")
+        layout.addWidget(self.filename_label)
 
-        self.detail_size_label = QLabel()
-        self.detail_size_label.setFont(QFont("Segoe UI", 9))
-        self.detail_size_label.setStyleSheet("color: #cccccc;")
+        layout.addStretch()
 
-        panel_layout.addWidget(self.detail_file_label)
-        panel_layout.addWidget(self.detail_date_label)
-        panel_layout.addWidget(self.detail_size_label)
+        # File info labels
+        self.info_label = QLabel()
+        self.info_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 12px;")
+        self.info_label.setAlignment(Qt.AlignRight)
+        layout.addWidget(self.info_label)
 
-        self.detail_panel.hide()
-        self.detail_panel_timer = QTimer(self)
-        self.detail_panel_timer.timeout.connect(self.hide_detail_panel)
+        # Close button
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(30, 30)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {COLORS['text_secondary']};
+                border: none;
+                font-size: 16px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['error']};
+                color: white;
+                border-radius: 15px;
+            }}
+        """)
+        close_btn.clicked.connect(self.close_viewer)
+        layout.addWidget(close_btn)
 
-        # Ensure the widget can receive keyboard focus
-        self.setFocusPolicy(Qt.StrongFocus)
+        return panel
 
-    def show_arrows(self):
-        """Show navigation arrows"""
-        if self.current_photo:
-            self.left_arrow.show()
-            self.right_arrow.show()
-            self.position_arrows()
+    def setup_shortcuts(self):
+        """Setup keyboard shortcuts"""
+        from PySide6.QtGui import QShortcut, QKeySequence
 
-            # Hide arrows after 3 seconds of no mouse movement
-            self.arrow_timer.start(3000)
+        # Navigation shortcuts
+        QShortcut(QKeySequence(Qt.Key_Left), self, self.show_previous)
+        QShortcut(QKeySequence(Qt.Key_Right), self, self.show_next)
+        QShortcut(QKeySequence(Qt.Key_Escape), self, self.close_viewer)
+        QShortcut(QKeySequence(Qt.Key_Space), self, self.toggle_playback)  # For videos
 
-    def hide_arrows(self):
-        """Hide navigation arrows"""
-        self.left_arrow.hide()
-        self.right_arrow.hide()
+    def show_media(self, media_data):
+        """Display media (image or video) with navigation"""
+        self.current_media_data = media_data
+        file_type = media_data.get('file_type', 'image')
 
-    def position_arrows(self):
-        """Position the arrow buttons on the sides of the photo viewer"""
-        if not self.photo_view:
-            return
+        if file_type == 'video':
+            # Show video viewer
+            self.stacked_widget.setCurrentWidget(self.video_viewer)
+            self.video_viewer.load_video(media_data)
+        else:
+            # Show image viewer
+            self.stacked_widget.setCurrentWidget(self.image_viewer)
+            self.image_viewer.display_image(media_data['file_path'])
 
-        viewer_rect = self.photo_view.geometry()
+        # Update info panel
+        self.update_info_panel(media_data)
 
-        # Position left arrow
-        left_x = 20
-        left_y = viewer_rect.height() // 2 - self.left_arrow.height() // 2
-        self.left_arrow.move(left_x, left_y + viewer_rect.y())
+    def update_info_panel(self, media_data):
+        """Update the information panel"""
+        # File name
+        file_name = media_data['file_path'].split('/')[-1].split('\\')[-1]
+        self.filename_label.setText(file_name)
 
-        # Position right arrow
-        right_x = viewer_rect.width() - self.right_arrow.width() - 20
-        right_y = viewer_rect.height() // 2 - self.right_arrow.height() // 2
-        self.right_arrow.move(right_x, right_y + viewer_rect.y())
+        # File info
+        file_size = media_data.get('file_size', 0)
+        file_size_mb = file_size / (1024 * 1024) if file_size else 0
+
+        info_parts = []
+
+        # File type and size
+        file_type = media_data.get('file_type', 'image').title()
+        info_parts.append(f"{file_type}")
+        info_parts.append(f"{file_size_mb:.1f} MB")
+
+        # Resolution
+        if media_data.get('resolution'):
+            info_parts.append(media_data['resolution'])
+
+        # Duration for videos
+        if media_data.get('duration'):
+            duration = media_data['duration']
+            minutes = int(duration // 60)
+            seconds = int(duration % 60)
+            info_parts.append(f"{minutes:02d}:{seconds:02d}")
+
+        self.info_label.setText(" • ".join(info_parts))
+
+    def show_next(self):
+        """Show next media file"""
+        next_media = self.photo_grid.get_next_photo()  # This now handles both photos and videos
+        if next_media:
+            self.show_media(next_media)
+        self.next_requested.emit()
+
+    def show_previous(self):
+        """Show previous media file"""
+        prev_media = self.photo_grid.get_prev_photo()  # This now handles both photos and videos
+        if prev_media:
+            self.show_media(prev_media)
+        self.prev_requested.emit()
+
+    def toggle_playback(self):
+        """Toggle video playback (only for videos)"""
+        if self.current_media_data and self.current_media_data.get('file_type') == 'video':
+            self.video_viewer.toggle_playback()
+
+    def close_viewer(self):
+        """Close the viewer"""
+        # Stop video playback if playing
+        if self.current_media_data and self.current_media_data.get('file_type') == 'video':
+            self.video_viewer.stop()
+        self.closed.emit()
 
     def resizeEvent(self, event):
-        """Reposition arrows when window is resized"""
+        """Handle window resize to reposition arrows"""
         super().resizeEvent(event)
-        self.position_arrows()
+        if hasattr(self, 'left_arrow') and hasattr(self, 'right_arrow'):
+            # Reposition arrows
+            content_height = self.height() - 60  # Subtract info panel height
+            self.left_arrow.move(20, content_height // 2 - 50)
+            self.right_arrow.move(self.width() - 80, content_height // 2 - 50)
 
     def enterEvent(self, event):
-        """Show arrows when mouse enters the widget"""
-        self.show_arrows()
+        """Show arrows when mouse enters"""
+        if self.current_media_data:
+            self.left_arrow.show()
+            self.right_arrow.show()
         super().enterEvent(event)
 
-    def mouseMoveEvent(self, event):
-        """Show arrows and detail panel on mouse move"""
-        self.show_arrows()
-
-        # Show detail panel
-        self.detail_panel.move(event.position().x() + 10, event.position().y() + 10)
-        self.detail_panel.show()
-
-        # Reset timer
-        self.detail_panel_timer.stop()
-        self.detail_panel_timer.start(2000)  # Hide after 2 seconds
-
-        super().mouseMoveEvent(event)
-
     def leaveEvent(self, event):
-        """Hide arrows when mouse leaves the widget"""
-        self.arrow_timer.start(1000)  # Hide arrows after 1 second delay
+        """Hide arrows when mouse leaves"""
+        self.left_arrow.hide()
+        self.right_arrow.hide()
         super().leaveEvent(event)
-
-    def load_photo(self, photo_data):
-        """Load and display a photo"""
-        self.current_photo = photo_data
-
-        if not photo_data:
-            self.info_label.setText("")
-            return
-
-        # Load photo
-        pixmap = QPixmap(photo_data['file_path'])
-        if not pixmap.isNull():
-            # Set the image to the viewer
-            self.photo_view.set_image(pixmap)
-
-            # Update info label
-            file_name = photo_data['file_path'].split('/')[-1].split('\\')[-1]
-            date_info = photo_data.get('date_taken', 'Unknown date')
-            size_kb = photo_data.get('file_size', 0) / 1024
-            dimensions = f"{pixmap.width()}x{pixmap.height()}"
-
-            self.info_label.setText(f"{file_name} | {dimensions} | {size_kb:.1f} KB")
-
-            # Update detail panel
-            self.detail_file_label.setText(file_name)
-            self.detail_date_label.setText(f"Date: {date_info}")
-            self.detail_size_label.setText(f"Size: {size_kb:.1f} KB | {dimensions}")
-        else:
-            self.info_label.setText(photo_data['file_path'])
-
-    def fit_image(self):
-        """Fit the current image to the view"""
-        self.photo_view.fit_in_view()
-
-    def zoom_in(self):
-        """Zoom in on the image"""
-        self.photo_view.scale(1.2, 1.2)
-        self.photo_view.zoom_factor *= 1.2
-
-    def zoom_out(self):
-        """Zoom out from the image"""
-        self.photo_view.scale(0.8, 0.8)
-        self.photo_view.zoom_factor *= 0.8
-
-    def close_view(self):
-        """Close the single photo view"""
-        self.close_signal.emit()
-
-    def next_photo(self):
-        """Show next photo"""
-        self.next_signal.emit()
-
-    def prev_photo(self):
-        """Show previous photo"""
-        self.prev_signal.emit()
-
-    def hide_detail_panel(self):
-        """Hide the detail panel after timeout"""
-        self.detail_panel.hide()
-        self.detail_panel_timer.stop()
-
-    def keyPressEvent(self, event):
-        """Handle keyboard navigation"""
-        key = event.key()
-
-        if key == Qt.Key.Key_Escape:
-            self.close_view()
-        elif key == Qt.Key.Key_Right or key == Qt.Key.Key_Down:
-            self.next_photo()
-        elif key == Qt.Key.Key_Left or key == Qt.Key.Key_Up:
-            self.prev_photo()
-        elif key == Qt.Key.Key_Space or key == Qt.Key.Key_F:
-            self.fit_image()
-        elif key == Qt.Key.Key_Plus or key == Qt.Key.Key_Equal:
-            self.zoom_in()
-        elif key == Qt.Key.Key_Minus:
-            self.zoom_out()
-        else:
-            super().keyPressEvent(event)

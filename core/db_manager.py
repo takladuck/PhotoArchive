@@ -29,7 +29,7 @@ class DBManager:
         # Get thread-local connection and cursor
         conn, cursor = self._connect()
 
-        # Create photos table
+        # Create media table (renamed from photos to support both images and videos)
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS photos (
             id INTEGER PRIMARY KEY,
@@ -43,9 +43,28 @@ class DBManager:
             backup_status TEXT DEFAULT 'not_backed',           
             thumbnail_path TEXT,
             file_size INTEGER,
-            last_modified TEXT
+            last_modified TEXT,
+            file_type TEXT DEFAULT 'image',
+            duration REAL,
+            resolution TEXT
         )
         ''')
+
+        # Add new columns to existing table if they don't exist
+        try:
+            cursor.execute('ALTER TABLE photos ADD COLUMN file_type TEXT DEFAULT "image"')
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+        try:
+            cursor.execute('ALTER TABLE photos ADD COLUMN duration REAL')
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+        try:
+            cursor.execute('ALTER TABLE photos ADD COLUMN resolution TEXT')
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
         # Create faces table (for future use)
         cursor.execute('''
@@ -59,8 +78,9 @@ class DBManager:
         conn.commit()
 
     def add_photo(self, file_path, file_hash=None, date_taken=None, location=None,
-                  thumbnail_path=None, file_size=None, last_modified=None):
-        """Add a photo to the database or update if it exists"""
+                  thumbnail_path=None, file_size=None, last_modified=None,
+                  file_type='image', duration=None, resolution=None):
+        """Add a photo or video to the database or update if it exists"""
         try:
             # Get thread-local connection and cursor
             conn, cursor = self._connect()
@@ -73,19 +93,19 @@ class DBManager:
 
             cursor.execute('''
             INSERT OR REPLACE INTO photos 
-            (file_path, hash, date_taken, location, thumbnail_path, file_size, last_modified)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (file_path, file_hash, date_taken, location, thumbnail_path, file_size, last_modified))
+            (file_path, hash, date_taken, location, thumbnail_path, file_size, last_modified, file_type, duration, resolution)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (file_path, file_hash, date_taken, location, thumbnail_path, file_size, last_modified, file_type, duration, resolution))
 
             conn.commit()
             return True
         except Exception as e:
-            print(f"Error adding photo to database: {e}")
+            print(f"Error adding media file to database: {e}")
             return False
 
-    def get_all_photos(self, sort_by='file_path', sort_order='ASC'):
-        """Get all photos from the database"""
-        valid_columns = ['file_path', 'date_taken', 'file_size', 'last_modified']
+    def get_all_photos(self, sort_by='file_path', sort_order='ASC', file_type=None):
+        """Get all photos/videos from the database with optional filtering by type"""
+        valid_columns = ['file_path', 'date_taken', 'file_size', 'last_modified', 'file_type']
         if sort_by not in valid_columns:
             sort_by = 'file_path'
 
@@ -96,14 +116,21 @@ class DBManager:
             # Get thread-local connection and cursor
             _, cursor = self._connect()
 
+            where_clause = "WHERE deleted = 0"
+            params = []
+
+            if file_type:
+                where_clause += " AND file_type = ?"
+                params.append(file_type)
+
             cursor.execute(f'''
             SELECT * FROM photos 
-            WHERE deleted = 0
+            {where_clause}
             ORDER BY {sort_by} {sort_order}
-            ''')
+            ''', params)
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
-            print(f"Error fetching photos: {e}")
+            print(f"Error fetching media files: {e}")
             return []
 
     def get_photo_by_path(self, file_path):

@@ -1,12 +1,12 @@
 from PySide6.QtWidgets import (QWidget, QGridLayout, QLabel, QScrollArea,
                             QSizePolicy, QVBoxLayout, QFrame, QHBoxLayout)
 from PySide6.QtCore import Qt, Signal, QSize, QMargins, QRect
-from PySide6.QtGui import QPixmap, QImage, QFont, QPainter, QColor, QPainterPath, QBrush
+from PySide6.QtGui import QPixmap, QImage, QFont, QPainter, QColor, QPainterPath, QBrush, QPen
 
 from .styling import THUMBNAIL_STYLESHEET, SELECTED_THUMBNAIL_STYLESHEET, COLORS
 
 class PhotoThumbnail(QFrame):
-    """Custom widget for photo thumbnails with click functionality"""
+    """Custom widget for photo and video thumbnails with click functionality"""
     clicked = Signal(dict)
     double_clicked = Signal(dict)
 
@@ -14,6 +14,7 @@ class PhotoThumbnail(QFrame):
         super().__init__()
         self.photo_data = photo_data
         self.selected = False
+        self.is_video = photo_data.get('file_type') == 'video'
         self.setFixedSize(220, 220)
 
         # Apply custom shadow effect using stylesheet
@@ -40,7 +41,7 @@ class PhotoThumbnail(QFrame):
         self.image_container.setScaledContents(False)
         self.image_container.setStyleSheet("background-color: transparent; border: none;")
 
-        # Caption for file name
+        # Caption for file name and duration (for videos)
         self.caption = QLabel()
         self.caption.setAlignment(Qt.AlignCenter)
         self.caption.setMaximumWidth(200)
@@ -68,7 +69,16 @@ class PhotoThumbnail(QFrame):
         file_name = self.photo_data['file_path'].split('/')[-1].split('\\')[-1]
         if len(file_name) > 25:
             file_name = file_name[:22] + "..."
-        self.caption.setText(file_name)
+
+        # Add duration info for videos
+        caption_text = file_name
+        if self.is_video and self.photo_data.get('duration'):
+            duration = self.photo_data['duration']
+            minutes = int(duration // 60)
+            seconds = int(duration % 60)
+            caption_text += f"\n{minutes:02d}:{seconds:02d}"
+
+        self.caption.setText(caption_text)
 
         if self.photo_data.get('thumbnail_path'):
             pixmap = QPixmap(self.photo_data['thumbnail_path'])
@@ -79,24 +89,69 @@ class PhotoThumbnail(QFrame):
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation
                 )
+
+                # Add play icon overlay for videos
+                if self.is_video:
+                    pixmap = self._add_play_icon_overlay(pixmap)
+
                 self.image_container.setPixmap(pixmap)
             else:
                 self.image_container.setText("Error loading thumbnail")
         else:
-            # If no thumbnail, try to load from original with high quality
-            try:
-                pixmap = QPixmap(self.photo_data['file_path'])
-                if not pixmap.isNull():
-                    pixmap = pixmap.scaled(
-                        QSize(200, 180),
-                        Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation
-                    )
-                    self.image_container.setPixmap(pixmap)
-                else:
+            # If no thumbnail, try to load from original (for images only)
+            if not self.is_video:
+                try:
+                    pixmap = QPixmap(self.photo_data['file_path'])
+                    if not pixmap.isNull():
+                        pixmap = pixmap.scaled(
+                            QSize(200, 180),
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation
+                        )
+                        self.image_container.setPixmap(pixmap)
+                    else:
+                        self.image_container.setText("Error loading image")
+                except:
                     self.image_container.setText("Error loading image")
-            except:
-                self.image_container.setText("Error loading image")
+            else:
+                self.image_container.setText("Video thumbnail unavailable")
+
+    def _add_play_icon_overlay(self, pixmap):
+        """Add a play icon overlay to video thumbnails"""
+        # Create a new pixmap to draw on
+        overlay_pixmap = QPixmap(pixmap)
+        painter = QPainter(overlay_pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Semi-transparent dark overlay
+        overlay_rect = QRect(0, 0, overlay_pixmap.width(), overlay_pixmap.height())
+        painter.fillRect(overlay_rect, QColor(0, 0, 0, 50))
+
+        # Draw play button in center
+        center_x = overlay_pixmap.width() // 2
+        center_y = overlay_pixmap.height() // 2
+        play_size = min(overlay_pixmap.width(), overlay_pixmap.height()) // 6
+
+        # Create play triangle
+        play_triangle = [
+            (center_x - play_size//2, center_y - play_size//2),
+            (center_x - play_size//2, center_y + play_size//2),
+            (center_x + play_size//2, center_y)
+        ]
+
+        # Draw white play button with border
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        painter.setBrush(QBrush(QColor(255, 255, 255, 200)))
+
+        from PySide6.QtGui import QPolygon
+        from PySide6.QtCore import QPoint
+
+        points = [QPoint(x, y) for x, y in play_triangle]
+        polygon = QPolygon(points)
+        painter.drawPolygon(polygon)
+
+        painter.end()
+        return overlay_pixmap
 
     def set_selected(self, selected):
         """Set the selected state of the thumbnail"""

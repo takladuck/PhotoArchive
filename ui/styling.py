@@ -7,14 +7,18 @@ Contains color schemes, stylesheets, and styling utilities.
 COLORS = {
     'primary': '#3498db',       # Blue
     'primary_dark': '#2980b9',  # Darker blue
+    'primary_hover': '#2980b9', # Hover state for primary buttons
     'accent': '#e74c3c',        # Red accent
     'background': '#121212',    # Very dark background
+    'surface': '#1e1e1e',       # Surface/card background (same as card)
     'card': '#1e1e1e',          # Dark grey card background
     'text': '#ffffff',          # White text
     'text_light': '#aaaaaa',    # Light grey text
+    'text_secondary': '#aaaaaa', # Secondary text color
     'border': '#333333',        # Dark border
     'success': '#2ecc71',       # Green for success
     'warning': '#f39c12',       # Orange for warnings
+    'error': '#e74c3c',         # Red for errors
     'highlight': '#1e88e5',     # Highlight blue
 }
 
@@ -37,7 +41,7 @@ QPushButton {{
 }}
 
 QPushButton:hover {{
-    background-color: {COLORS['primary_dark']};
+    background-color: {COLORS['primary_hover']};
 }}
 
 QPushButton:pressed {{
